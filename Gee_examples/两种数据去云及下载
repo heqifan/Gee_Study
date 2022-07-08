@@ -1,0 +1,170 @@
+已有数据
+	2021取样点.xlsx
+
+影像需求：
+	1、 landsat8影像
+	2、 导出范围自拟，需要包含文件内的所有样点
+	3、 年份选择最近几年的，月份要求5，6，7，8，9之间
+	3、 landsat8影像需要做去云处理
+	4、 根据landsat8去云后的影像导出一张RGB的影像和一张NDVI影像
+
+一.RGB图像的导出
+
+```python
+import geemap
+import pandas as pd
+import ee
+Map = geemap.Map()
+Map
+```
+
+导入基本库和底图
+
+```python
+df = pd.read_excel(r'D:\geemap\gee作业\Landsat8数据下载\2021取样点转换结果.xlsx')
+df
+```
+
+导入excel中包含点的数据，并用了pandas的库另其转换为dataframe，这里对excel进行数据处理也是个必要环节。
+
+```python
+points = geemap.pandas_to_ee(df,latitude='Y',longitude='X')
+Map.addLayer(points,{},'points')
+```
+
+接着就是将dataframe上的数据先转成点再加入底图上，这里是转成点，如果是转成其它的要素也可以
+
+```python
+feature = Map.draw_last_feature
+roi = feature.geometry()
+```
+
+在运行这一步之前要先画好范围，意思就是获取包括要研究的台站的区域范围。
+
+```python
+def maskL8srgb(dataset_kec):                                      #去云
+    # Bits 3 and 5 are cloud shadow and cloud, respectively.
+    cloudShadowBitMask = (1 << 3)
+    cloudsBitMask = (1 << 5)
+    # Get the pixel QA band.
+    qa = dataset_kec.select('pixel_qa')
+    # Both flags should be set to zero, indicating clear conditions.
+    mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0) 
+                 .And(qa.bitwiseAnd(cloudsBitMask).eq(0))
+    return dataset_kec.updateMask(mask)
+```
+
+定义去云函数：1.  Bits为3和Bits为5分别是云阴影和云。其中<<的意思为  左移动运算符：运算数的各二进位全部左移若干位，由 **<<** 右边的数字指定了移动的位数，高位丢弃，低位补0。（具体我也不清楚这里的意思）
+
+2. mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0) \
+                     .And(qa.bitwiseAnd(cloudsBitMask).eq(0))
+
+意思为定义掩膜，即将云阴影和云的值设置为0。
+
+3.updateMask（） 就是进行掩膜。
+
+```python
+dataset_rgb = ee.ImageCollection('LANDSAT/LC08/C01/T1_SR')\
+                .filterDate("2019","2021")\
+                .filterBounds(roi)\
+                .map(maskL8srgb)
+```
+
+1. filterBounds(roi)意思为过滤出边界的周围的一些范围，减少后面的计算量。
+2. .map(maskL8srgb)意思为将函数映射到图像集合上，并返回集合，这样就不需要用循环了。具体请详见 [ee.ImageCollection.map](https://developers.google.com/earth-engine/apidocs/ee-imagecollection-map?hl=en)
+
+```python
+median = dataset_rgb.reduce(ee.Reducer.median()) # 将影像集转换为单张影像 
+```
+
+1.[reduce()](https://developers.google.com/earth-engine/apidocs/ee-imagecollection-reduce?hl=en)简单来说就是给数据集应用减量化
+
+2.ee.Reducer.median()简单来说就是在前面先通知要用减量化之后，再进行减量化的实际操作，这里是求中间值，还可以求平均和其它。
+
+```python
+vis = {
+    'bands': ['B4_median', 'B3_median', 'B2_median'] ,
+      'min': 0,
+      'max': 3000,  # 最大拉伸
+    'gamma': 1.4, # 即用于gamma矫正的一些参数，以矫正图像
+}
+    
+Map.addLayer(median,vis,"RGB")
+```
+
+1.添加图层
+
+```python
+clip1 = median.clip(roi)           #mosaic获取的是最后一个有值的像素，然后生成一张影像
+Map.addLayer(clip1,vis,"clipRGB")
+```
+
+1.进行精确的裁剪
+
+2.再次加入图层
+
+```python
+geemap.ee_export_image_to_drive(clip1, description='RGB', folder='export', region=roi, scale=30)
+```
+
+1.将图像导出到云盘
+
+2.description='RGB'：类型为RGB。
+
+3.folder='export' ：文件夹为 export
+
+4.scale :缩放比例
+
+
+
+二.NDVI图像的导出
+
+```python
+def maskL8sr(dataset_qar):
+  mask=ee.Algorithms.Landsat.simpleCloudScore(dataset_qar).select(['cloud']).lte(20)               #去云
+  ndvi=dataset_qar.normalizedDifference(['B5', 'B4']).updateMask(mask)                             #NDVI
+  return ndvi 
+```
+
+1.NDVI去云函数，简单来说就是定义一个函数来对图像的云层波段的值进行掩膜。其中[ee.Algorithms.Landsat.simpleCloudScore()](https://developers.google.com/earth-engine/apidocs/ee-algorithms-landsat-simplecloudscore?hl=en)详解请点击左方链接。
+
+[dataset_qar.normalizedDifference()](https://developers.google.com/earth-engine/apidocs/ee-image-normalizeddifference?hl=en)详解请参考左方链接。
+
+```python
+dataset_qar = ee.ImageCollection("LANDSAT/LC08/C01/T1_RT")\
+                .filterDate("2019","2021")\
+                .filterBounds(roi)\
+                .filter(ee.Filter.lt('CLOUD_COVER',10)) \
+                .map(maskL8sr)
+vis_para = {
+    'min':0,
+    'max': 1.0,
+'palette': [                                                                         #调色板
+    'FFFFFF', 'CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718', '74A901',
+    '66A000', '529400', '3E8601', '207401', '056201', '004C00', '023B01',
+    '012E01', '011D01', '011301'
+  ]
+}
+Map.addLayer(dataset_qar, vis_para, "NDVI")
+clip2 = dataset_qar.mosaic().clip(roi)           #mosaic获取的是最后一个有值的像素，然后生成一张影像
+Map.addLayer(clip2,vis_para,"clipNDVI")
+```
+
+1.这里讲一下.mosaic()函数，与上面的解释一样，就是获得图像集的最后一张图，与简单的Map.addLayer(imagecollection)作用一样，其中与[qualityMosaic、max](https://zhuanlan.zhihu.com/p/67418786)的区别请详见左方链接。
+
+最后下载方式就像上面的一样。
+
+```python
+geemap.ee_export_image_to_drive(clip1, description='RGB', folder='export', region=roi, scale=30)
+```
+
+也可以不用下载到云盘，下载到文件夹下也可以。
+
+```python
+if not os.path.exists(para.outpath1):
+    os.makedirs(para.outpath)
+# 导出栅格影像，file_per_band为是否按波段分别导出
+    geemap.ee_export_image(Layer, filename=file, scale=1000, region=roi,file_per_band=True)
+    
+```
+
